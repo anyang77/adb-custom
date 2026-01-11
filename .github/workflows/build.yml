@@ -71,11 +71,13 @@ jobs:
         cd ~/aosp
         echo "=== Syncing AOSP Sources (this takes 1-2 hours) ==="
 
-        # Sync with very long timeout - use different flags that are more reliable
+        # Sync with very long timeout - include ALL build system components
         timeout 7200 repo sync -j4 --no-tags --no-clone-bundle \
           packages/modules/adb \
           build/make \
           build/soong \
+          build/blueprint \
+          build/bazel \
           system/core \
           system/libbase \
           system/logging \
@@ -83,6 +85,7 @@ jobs:
           system/unwinding \
           external/libcxx \
           external/libcxxabi \
+          external/boringssl \
           prebuilts/sdk \
           prebuilts/clang/host/linux-x86 \
           frameworks/native \
@@ -95,7 +98,7 @@ jobs:
         echo "Sync exit code: $SYNC_RESULT"
 
         # Even if timeout, check if key files exist
-        if [ -d "packages/modules/adb" ] && [ -f "build/make/core/main.mk" ] && [ -f "build/soong/soong_ui.bash" ]; then
+        if [ -d "packages/modules/adb" ] && [ -f "build/make/core/main.mk" ] && [ -f "build/soong/soong_ui.bash" ] && [ -f "build/blueprint/microfactory/microfactory.bash" ]; then
           echo "✓ Essential AOSP files synced successfully"
         else
           echo "⚠ Some files may not be synced, checking status..."
@@ -103,8 +106,10 @@ jobs:
           [ -d "packages/modules/adb" ] && echo "  ✓ packages/modules/adb exists" || echo "  ✗ packages/modules/adb MISSING"
           [ -d "build/make" ] && echo "  ✓ build/make exists" || echo "  ✗ build/make MISSING"
           [ -d "build/soong" ] && echo "  ✓ build/soong exists" || echo "  ✗ build/soong MISSING"
+          [ -d "build/blueprint" ] && echo "  ✓ build/blueprint exists" || echo "  ✗ build/blueprint MISSING"
           [ -d "system/core" ] && echo "  ✓ system/core exists" || echo "  ✗ system/core MISSING"
           [ -f "build/soong/soong_ui.bash" ] && echo "  ✓ soong_ui.bash exists" || echo "  ✗ soong_ui.bash MISSING"
+          [ -f "build/blueprint/microfactory/microfactory.bash" ] && echo "  ✓ microfactory.bash exists" || echo "  ✗ microfactory.bash MISSING"
         fi
 
     - name: Verify AOSP Structure
