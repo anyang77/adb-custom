@@ -8,160 +8,177 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 300  # 5 hours total
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-    - name: Set up NDK
-      run: |
-        echo "Downloading Android NDK..."
-        cd /opt
-        wget -q https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
-        unzip -q android-ndk-r26b-linux.zip
-        rm android-ndk-r26b-linux.zip
-        echo "NDK_ROOT=/opt/android-ndk-r26b" >> $GITHUB_ENV
+    - name: Set up Java
+      uses: actions/setup-java@v4
+      with:
+        java-version: '11'
+        distribution: 'temurin'
 
-    - name: Install build tools
+    - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y --no-install-recommends \
+        sudo apt-get install -y \
+          openjdk-11-jdk \
+          python3 python3-dev \
+          git curl wget \
+          repo \
           build-essential \
-          git curl wget
+          libssl-dev \
+          bc bison flex \
+          ccache \
+          ninja-build
 
-    - name: Check NDK
+    - name: Create AOSP workspace
       run: |
-        ls -la $NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/ | grep clang
+        mkdir -p ~/aosp
+        cd ~/aosp
+        git config --global user.email "build@example.com"
+        git config --global user.name "Build System"
+        git config --global gc.autodetach false
 
-    - name: Prepare build environment
+    - name: Initialize AOSP Repository
       run: |
-        mkdir -p build_output
-        cd $GITHUB_WORKSPACE
+        cd ~/aosp
+        echo "=== Initializing AOSP ==="
 
-        # Set up compiler paths
-        export CC=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang
-        export CXX=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang++
-        export AR=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-ar
+        # Force HTTPS instead of SSH
+        git config --global url."https://android.googlesource.com/".insteadOf "ssh://android.googlesource.com/"
 
-        # Verify compilers exist
-        ls -la "$CC" || (echo "Compiler not found"; exit 1)
-        "$CC" --version
-
-    - name: Compile ADB with NDK
-      run: |
-        export CC=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang
-        export CXX=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang++
-        export AR=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-ar
-        export RANLIB=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-ranlib
-
-        cd $GITHUB_WORKSPACE
-
-        # Compile flags for ARM64 Android
-        CFLAGS="-O2 -Wall -Wextra -D_GNU_SOURCE -DADB_HOST=0"
-        CXXFLAGS="-O2 -Wall -std=c++17 -D_GNU_SOURCE -DADB_HOST=0 -fno-exceptions -fno-rtti"
-        LDFLAGS="-static-libstdc++"
-
-        echo "Collecting source files..."
-        # Core ADB files
-        SOURCE_FILES=""
-
-        # Find all .cpp and .c files (excluding test files)
-        for file in $(find . -name "*.cpp" -o -name "*.c" | grep -v test | grep -v _test | head -20); do
-          SOURCE_FILES="$SOURCE_FILES $file"
-        done
-
-        echo "Found source files, attempting compilation..."
-
-        # Try direct compilation with minimal dependencies
-        $CXX $CXXFLAGS -I. -I./daemon \
-          $SOURCE_FILES \
-          $LDFLAGS \
-          -o build_output/adbd_arm64 2>&1 | head -50 || true
-
-        # Check if binary was created
-        if [ -f "build_output/adbd_arm64" ]; then
-          echo "✓ Binary created successfully"
-          file build_output/adbd_arm64
-          ls -lh build_output/adbd_arm64
-        else
-          echo "⚠ Direct compilation may have failed, checking for partial binary..."
-          find . -name "adbd*" -type f 2>/dev/null | head -5
-        fi
-
-    - name: Find and prepare binary
-      run: |
-        echo "Searching for compiled binaries..."
-
-        # Look for any adbd binary
-        ADBD_PATH=$(find . -name "adbd" -o -name "adbd_arm64" | grep -v ".git" | head -1)
-
-        if [ -n "$ADBD_PATH" ] && [ -f "$ADBD_PATH" ]; then
-          echo "✓ Found binary: $ADBD_PATH"
-          file "$ADBD_PATH"
-          ls -lh "$ADBD_PATH"
-
-          # Copy to workspace root
-          cp "$ADBD_PATH" $GITHUB_WORKSPACE/adbd_arm64
-          echo "Binary ready for upload"
-        else
-          echo "Checking build_output directory..."
-          if [ -f "build_output/adbd_arm64" ]; then
-            cp build_output/adbd_arm64 $GITHUB_WORKSPACE/adbd_arm64
-            echo "✓ Binary copied from build_output"
-          else
-            echo "⚠ No binary found - compilation may have failed"
+        # Try Android 13
+        echo "Attempting Android 13.0.0_r1..."
+        repo init -u https://android.googlesource.com/platform/manifest \
+                  -b android-13.0.0_r1 --depth=1 --no-tags 2>&1 | tail -30 && \
+        echo "✓ Android 13 init successful" || {
+          echo "Android 13 failed, trying Android 12..."
+          repo init -u https://android.googlesource.com/platform/manifest \
+                    -b android-12.0.0_r1 --depth=1 --no-tags 2>&1 | tail -30 && \
+          echo "✓ Android 12 init successful" || {
+            echo "❌ Both Android 13 and 12 failed"
             exit 1
-          fi
+          }
+        }
+
+    - name: Sync AOSP Sources
+      run: |
+        cd ~/aosp
+        echo "=== Syncing AOSP Sources (this takes 1-2 hours) ==="
+
+        # Sync with very long timeout
+        timeout 7200 repo sync -j4 \
+          packages/modules/adb \
+          build/make \
+          system/core \
+          system/libbase \
+          system/logging \
+          system/memory/libmemunreachable \
+          system/unwinding \
+          external/libcxx \
+          external/libcxxabi \
+          prebuilts/sdk \
+          prebuilts/clang/host/linux-x86 \
+          frameworks/native \
+          bionic \
+          2>&1 | tail -100 || {
+            echo "⚠ Sync timed out or failed, checking status..."
+            ls -la packages/modules/adb/ 2>/dev/null && echo "✓ ADB directory exists" || echo "✗ ADB not synced"
+            exit 1
+          }
+
+    - name: Verify AOSP Structure
+      run: |
+        cd ~/aosp
+        echo "=== Verifying AOSP Structure ==="
+
+        [ -d "packages/modules/adb" ] && echo "✓ packages/modules/adb" || (echo "✗ Missing adb"; exit 1)
+        [ -d "build/make" ] && echo "✓ build/make" || (echo "✗ Missing build/make"; exit 1)
+        [ -d "system/core" ] && echo "✓ system/core" || (echo "✗ Missing system/core"; exit 1)
+        [ -f "build/envsetup.sh" ] && echo "✓ build/envsetup.sh" || (echo "✗ Missing envsetup.sh"; exit 1)
+
+    - name: Copy Modified ADB Source
+      run: |
+        cd ~/aosp
+        echo "=== Copying Modified ADB Source ==="
+
+        rm -rf packages/modules/adb
+        cp -r $GITHUB_WORKSPACE packages/modules/adb
+
+        echo "✓ Modified ADB copied to AOSP"
+        ls -la packages/modules/adb/ | head -10
+
+    - name: Setup Build Environment
+      run: |
+        cd ~/aosp
+        echo "=== Setting Up Build Environment ==="
+
+        # Source the build environment
+        source build/envsetup.sh > /dev/null 2>&1
+
+        # Configure for ARM64
+        lunch aosp_arm64-eng > /dev/null 2>&1
+
+        echo "✓ Build environment ready"
+
+    - name: Build ADB Daemon
+      run: |
+        cd ~/aosp
+        echo "=== Building ADB Daemon ==="
+
+        source build/envsetup.sh > /dev/null 2>&1
+        lunch aosp_arm64-eng > /dev/null 2>&1
+
+        # Build with verbose output
+        m adbd -j$(nproc) 2>&1 | tail -100
+
+        if [ ${PIPESTATUS[0]} -eq 0 ]; then
+          echo "✓ Build completed"
+        else
+          echo "⚠ Build may have warnings, checking for binary..."
         fi
 
-    - name: Verify binary
+    - name: Locate and Verify Binary
       run: |
-        if [ -f "adbd_arm64" ]; then
-          file adbd_arm64
-          ls -lh adbd_arm64
-          echo "✓ Binary ready"
-        else
-          echo "❌ adbd_arm64 not found in workspace"
+        cd ~/aosp
+        echo "=== Locating Compiled Binary ==="
+
+        # Find the adbd binary
+        ADBD_PATH=$(find out -name "adbd" -type f 2>/dev/null | grep -v ".git" | head -1)
+
+        if [ -z "$ADBD_PATH" ]; then
+          echo "❌ adbd binary not found in out/"
+          echo "Searching entire AOSP directory..."
+          find . -name "adbd" -type f 2>/dev/null | head -5
           exit 1
         fi
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      if: success()
-      with:
-        name: adbd-arm64
-        path: adbd_arm64
-        retention-days: 30
+        echo "✓ Found: $ADBD_PATH"
+        file "$ADBD_PATH"
+        ls -lh "$ADBD_PATH"
 
-    - name: Create Release
-      if: success()
-      uses: softprops/action-gh-release@v2
-      with:
-        files: adbd_arm64
-        tag_name: v${{ github.run_number }}
-        body: |
-          # ADB ARM64 Build #${{ github.run_number }}
+        # Copy to workspace root
+        cp "$ADBD_PATH" $GITHUB_WORKSPACE/adbd_arm64
+        echo "✓ Binary copied to workspace"
 
-          **修改说明:**
-          - ✓ 禁用授权检查 (auth_required = false)
-          - ✓ 强制 Root 权限 (should_drop_privileges() = false)
-          - ✓ 无系统属性依赖
+    - name: Verify Final Binary
+      run: |
+        cd $GITHUB_WORKSPACE
+        echo "=== Verifying Final Binary ==="
 
-          **使用方法:**
-          ```bash
-          adb push adbd_arm64 /system/bin/adbd
-          adb shell chmod 755 /system/bin/adbd
-          adb reboot
-          ```
+        if [ ! -f "adbd_arm64" ]; then
+          echo "❌ Final binary not found"
+          exit 1
+        fi
 
-          **编译信息:**
-          - 架构: ARM64 (aarch64)
-          - API 级别: 30+
-          - 编译工具: Android NDK r26b
-          - 编译 ID: ${{ github.run_id }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        file adbd_arm64
+        ls -lh adbd_arm64
+        echo "✓ Binary ready for release"
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
@@ -195,6 +212,7 @@ jobs:
           **编译信息:**
           - 架构: ARM64 (aarch64)
           - API 级别: 30+
+          - 使用方法：完整 AOSP 编译
           - 编译 ID: ${{ github.run_id }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
