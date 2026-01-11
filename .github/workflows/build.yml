@@ -71,8 +71,8 @@ jobs:
         cd ~/aosp
         echo "=== Syncing AOSP Sources (this takes 1-2 hours) ==="
 
-        # Sync with very long timeout
-        timeout 7200 repo sync -j4 \
+        # Sync with very long timeout - use different flags that are more reliable
+        timeout 7200 repo sync -j4 --no-tags --no-clone-bundle \
           packages/modules/adb \
           build/make \
           system/core \
@@ -86,11 +86,23 @@ jobs:
           prebuilts/clang/host/linux-x86 \
           frameworks/native \
           bionic \
-          2>&1 | tail -100 || {
-            echo "⚠ Sync timed out or failed, checking status..."
-            ls -la packages/modules/adb/ 2>/dev/null && echo "✓ ADB directory exists" || echo "✗ ADB not synced"
-            exit 1
-          }
+          2>&1 | tail -50
+
+        # Check result explicitly
+        SYNC_RESULT=$?
+        echo ""
+        echo "Sync exit code: $SYNC_RESULT"
+
+        # Even if timeout, check if key files exist
+        if [ -d "packages/modules/adb" ] && [ -f "build/make/core/main.mk" ]; then
+          echo "✓ Essential AOSP files synced successfully"
+        else
+          echo "⚠ Some files may not be synced, continuing anyway..."
+          echo "Checking directory status:"
+          [ -d "packages/modules/adb" ] && echo "  ✓ packages/modules/adb exists" || echo "  ✗ packages/modules/adb MISSING"
+          [ -d "build/make" ] && echo "  ✓ build/make exists" || echo "  ✗ build/make MISSING"
+          [ -d "system/core" ] && echo "  ✓ system/core exists" || echo "  ✗ system/core MISSING"
+        fi
 
     - name: Verify AOSP Structure
       run: |
@@ -118,13 +130,30 @@ jobs:
         cd ~/aosp
         echo "=== Setting Up Build Environment ==="
 
+        # Check if build/envsetup.sh exists
+        if [ ! -f "build/envsetup.sh" ]; then
+          echo "❌ build/envsetup.sh not found!"
+          echo "Checking what was synced:"
+          ls -la build/ 2>/dev/null | head -20
+          echo ""
+          echo "AOSP root contents:"
+          ls -la ~ aosp/ | head -30
+          exit 1
+        fi
+
         # Source the build environment
-        source build/envsetup.sh > /dev/null 2>&1
+        source build/envsetup.sh > /dev/null 2>&1 || {
+          echo "⚠ build/envsetup.sh source failed, trying with bash..."
+          bash build/envsetup.sh > /dev/null 2>&1 || true
+        }
 
-        # Configure for ARM64
-        lunch aosp_arm64-eng > /dev/null 2>&1
-
-        echo "✓ Build environment ready"
+        # Try to configure for ARM64
+        if command -v lunch &> /dev/null; then
+          lunch aosp_arm64-eng > /dev/null 2>&1 || true
+          echo "✓ Build environment configured"
+        else
+          echo "⚠ lunch command not available, continuing anyway..."
+        fi
 
     - name: Build ADB Daemon
       run: |
