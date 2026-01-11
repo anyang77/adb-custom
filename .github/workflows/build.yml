@@ -160,17 +160,22 @@ jobs:
         cd ~/aosp
         echo "=== Building ADB Daemon ==="
 
-        source build/envsetup.sh > /dev/null 2>&1
-        lunch aosp_arm64-eng > /dev/null 2>&1
+        # Source build environment and run build in same shell
+        bash -c '
+          set -e
+          source build/envsetup.sh
+          lunch aosp_arm64-eng
 
-        # Build with verbose output
-        m adbd -j$(nproc) 2>&1 | tail -100
+          echo "Building adbd..."
+          m adbd -j$(nproc) 2>&1 | tail -100
+        ' || {
+          echo "Build failed, trying alternative method..."
 
-        if [ ${PIPESTATUS[0]} -eq 0 ]; then
-          echo "✓ Build completed"
-        else
-          echo "⚠ Build may have warnings, checking for binary..."
-        fi
+          # Fallback: Try building specific module
+          cd packages/modules/adb
+          ls -la
+          exit 1
+        }
 
     - name: Locate and Verify Binary
       run: |
