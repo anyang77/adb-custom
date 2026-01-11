@@ -160,22 +160,33 @@ jobs:
         cd ~/aosp
         echo "=== Building ADB Daemon ==="
 
-        # Source build environment and run build in same shell
-        bash -c '
-          set -e
-          source build/envsetup.sh
-          lunch aosp_arm64-eng
-
-          echo "Building adbd..."
-          m adbd -j$(nproc) 2>&1 | tail -100
-        ' || {
-          echo "Build failed, trying alternative method..."
-
-          # Fallback: Try building specific module
-          cd packages/modules/adb
-          ls -la
+        # Check if envsetup.sh really exists and is readable
+        if [ ! -f "build/envsetup.sh" ]; then
+          echo "❌ build/envsetup.sh NOT FOUND"
+          ls -la build/ 2>/dev/null || echo "build/ doesn't exist"
           exit 1
-        }
+        fi
+
+        echo "✓ build/envsetup.sh found"
+
+        # Try to source it with debug output
+        echo "Attempting to source build/envsetup.sh..."
+        bash -c '
+          set -x  # Enable debug output
+          cd ~/aosp
+          source build/envsetup.sh 2>&1 | head -30
+          echo "envsetup sourced"
+
+          echo "Running lunch..."
+          lunch aosp_arm64-eng 2>&1 | head -30
+          echo "lunch complete"
+
+          echo "Checking m command..."
+          which m || echo "m not found"
+
+          echo "Starting build..."
+          m adbd -j4 2>&1 | tail -200
+        ' 2>&1 | head -300
 
     - name: Locate and Verify Binary
       run: |
