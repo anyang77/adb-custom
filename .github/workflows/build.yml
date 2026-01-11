@@ -1,0 +1,176 @@
+name: Build ADB ARM64
+
+on:
+  push:
+    branches: [ main, develop ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'  # 每天自动编译
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Set up Java
+      uses: actions/setup-java@v3
+      with:
+        java-version: '11'
+        distribution: 'temurin'
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          openjdk-11-jdk \
+          python3 python3-dev \
+          git curl wget \
+          repo \
+          build-essential \
+          libssl-dev \
+          bc bison flex \
+          ccache
+
+    - name: Create AOSP workspace
+      run: |
+        mkdir -p ~/aosp
+        cd ~/aosp
+        git config --global user.email "build@example.com"
+        git config --global user.name "Build System"
+
+    - name: Initialize AOSP
+      run: |
+        cd ~/aosp
+        echo "Initializing AOSP repository..."
+        repo init -u https://android.googlesource.com/platform/manifest \
+                  -b android-14 \
+                  -q --depth=1
+
+    - name: Sync AOSP sources (partial)
+      run: |
+        cd ~/aosp
+        echo "Syncing AOSP sources (this may take 30-40 minutes)..."
+        repo sync -j4 -q --fail-fast \
+                  packages/modules/adb \
+                  build \
+                  system/core \
+                  prebuilts/sdk \
+                  prebuilts/clang/host \
+                  frameworks/base \
+        2>&1 | tail -20 || true
+
+        echo "Download complete, total size:"
+        du -sh ~/aosp/
+
+    - name: Copy modified ADB source
+      run: |
+        cd ~/aosp
+        rm -rf packages/modules/adb
+        cp -r $GITHUB_WORKSPACE packages/modules/adb
+        echo "✓ ADB source copied"
+        ls -la packages/modules/adb/ | head -10
+
+    - name: Setup build environment
+      run: |
+        cd ~/aosp
+        source build/envsetup.sh > /dev/null
+        lunch aosp_arm64-eng > /dev/null 2>&1
+        echo "✓ Build environment configured"
+
+    - name: Build ADB daemon
+      run: |
+        cd ~/aosp
+        echo "Starting ADB build..."
+        m adbd -j$(nproc) 2>&1 | tail -50
+        BUILD_STATUS=$?
+
+        if [ $BUILD_STATUS -eq 0 ]; then
+          echo "✓ Build successful"
+        else
+          echo "❌ Build failed with status: $BUILD_STATUS"
+          exit $BUILD_STATUS
+        fi
+
+    - name: Locate compiled binary
+      run: |
+        echo "Searching for compiled adbd..."
+        ADBD_PATH=$(find ~/aosp/out -name "adbd" -type f 2>/dev/null | head -1)
+
+        if [ -z "$ADBD_PATH" ]; then
+          echo "❌ adbd binary not found!"
+          echo "Checking build output directory:"
+          find ~/aosp/out/target/product -type f -name "adbd*" 2>/dev/null || echo "No adbd found"
+          exit 1
+        fi
+
+        echo "✓ Found: $ADBD_PATH"
+        file "$ADBD_PATH"
+        ls -lh "$ADBD_PATH"
+
+        # Copy to workspace
+        cp "$ADBD_PATH" adbd_arm64
+        echo "✓ Copied to workspace"
+
+    - name: Verify binary
+      run: |
+        echo "Binary information:"
+        file adbd_arm64
+        echo ""
+        echo "Size:"
+        ls -lh adbd_arm64
+        echo ""
+        echo "Architecture:"
+        readelf -h adbd_arm64 2>/dev/null | grep Machine || echo "readelf not available"
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      if: success()
+      with:
+        name: adbd-arm64
+        path: adbd_arm64
+        retention-days: 30
+        if-no-files-found: error
+
+    - name: Create Release
+      if: success()
+      uses: softprops/action-gh-release@v1
+      with:
+        files: adbd_arm64
+        tag_name: v${{ github.run_number }}
+        body: |
+          # ADB ARM64 Build #${{ github.run_number }}
+
+          自动编译的 ADB ARM64 二进制文件
+
+          **修改说明:**
+          - ✓ 禁用授权检查 (auth_required = false)
+          - ✓ 强制 Root 权限 (should_drop_privileges() = false)
+          - ✓ 无系统属性依赖
+
+          **使用方法:**
+          ```bash
+          adb push adbd_arm64 /system/bin/adbd
+          adb shell chmod 755 /system/bin/adbd
+          adb reboot
+          ```
+
+          编译时间: ${{ job.started_at }}
+          构建 ID: ${{ github.run_id }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Send notification
+      if: always()
+      run: |
+        if [ ${{ job.status }} == 'success' ]; then
+          echo "✅ Build succeeded!"
+          echo "Download the artifact from Actions or Releases"
+        else
+          echo "❌ Build failed!"
+        fi

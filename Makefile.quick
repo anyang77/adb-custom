@@ -1,0 +1,90 @@
+# Makefile for ADB ARM64 Quick Compilation
+# 使用 NDK 工具链快速编译
+
+NDK_PATH = /e/zygisk项目/android-ndk-r26b
+CC = $(NDK_PATH)/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android30-clang
+CXX = $(NDK_PATH)/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android30-clang++
+AR = $(NDK_PATH)/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android-ar
+
+# 编译标志
+CFLAGS = -O2 -Wall -D_GNU_SOURCE -DADB_HOST=0
+CXXFLAGS = -O2 -Wall -std=c++17 -D_GNU_SOURCE -DADB_HOST=0 -fno-exceptions -fno-rtti
+LDFLAGS = -static-libstdc++
+
+# 包含路径
+INCLUDES = -I. -I./daemon
+
+# 源文件 (最小化版本)
+CORE_SOURCES = \
+    adb.cpp \
+    adb_io.cpp \
+    adb_utils.cpp \
+    transport.cpp \
+    types.cpp \
+    sysdeps_unix.cpp
+
+DAEMON_SOURCES = \
+    daemon/main.cpp \
+    daemon/auth.cpp \
+    daemon/logging.cpp
+
+SOURCES = $(CORE_SOURCES) $(DAEMON_SOURCES)
+
+# 目标文件
+OBJECTS = $(SOURCES:.cpp=.o)
+
+# 输出目标
+TARGET = adbd_arm64
+
+# 默认目标
+.PHONY: all clean help
+
+all: $(TARGET)
+	@echo ""
+	@echo "✅ 编译完成!"
+	@echo ""
+	@echo "📦 输出文件:"
+	@ls -lh $(TARGET)
+	@echo ""
+	@file $(TARGET)
+	@echo ""
+	@echo "📱 推送到设备:"
+	@echo "  adb push $(TARGET) /system/bin/adbd"
+	@echo "  adb shell chmod 755 /system/bin/adbd"
+	@echo "  adb reboot"
+
+$(TARGET): $(OBJECTS)
+	@echo "🔗 链接: $@"
+	@$(CXX) $(OBJECTS) $(LDFLAGS) -o $@
+	@echo "✓ 链接完成"
+
+%.o: %.cpp
+	@echo "📝 编译: $<"
+	@$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+clean:
+	@echo "🗑️  清理..."
+	@rm -f $(OBJECTS) $(TARGET)
+	@echo "✓ 清理完成"
+
+help:
+	@echo "ADB ARM64 Makefile"
+	@echo ""
+	@echo "命令:"
+	@echo "  make       - 编译 adbd"
+	@echo "  make clean - 清理编译文件"
+	@echo "  make help  - 显示此帮助"
+	@echo ""
+	@echo "编译时间: ~2-3 分钟"
+	@echo "输出文件: $(TARGET)"
+
+.PHONY: print-info
+print-info:
+	@echo "编译配置:"
+	@echo "  NDK: $(NDK_PATH)"
+	@echo "  CC: $(CC)"
+	@echo "  CXX: $(CXX)"
+	@echo "  CXXFLAGS: $(CXXFLAGS)"
+	@echo ""
+	@echo "源文件数: $(words $(SOURCES))"
+	@echo "目标文件: $(TARGET)"
