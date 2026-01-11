@@ -4,8 +4,6 @@ on:
   push:
     branches: [ main, develop ]
   workflow_dispatch:
-  schedule:
-    - cron: '0 0 * * *'  # 每天自动编译
 
 jobs:
   build:
@@ -55,7 +53,7 @@ jobs:
     - name: Sync AOSP sources
       run: |
         cd ~/aosp
-        echo "Syncing AOSP sources (this may take 30-40 minutes)..."
+        echo "Syncing AOSP sources..."
         repo sync -j4 -q --fail-fast \
                   packages/modules/adb \
                   build \
@@ -65,16 +63,12 @@ jobs:
                   frameworks/base \
         2>&1 | tail -20 || true
 
-        echo "Download complete, total size:"
-        du -sh ~/aosp/
-
     - name: Copy modified ADB source
       run: |
         cd ~/aosp
         rm -rf packages/modules/adb
         cp -r $GITHUB_WORKSPACE packages/modules/adb
         echo "✓ ADB source copied"
-        ls -la packages/modules/adb/ | head -10
 
     - name: Setup build environment
       run: |
@@ -88,14 +82,6 @@ jobs:
         cd ~/aosp
         echo "Starting ADB build..."
         m adbd -j$(nproc) 2>&1 | tail -50
-        BUILD_STATUS=$?
-
-        if [ $BUILD_STATUS -eq 0 ]; then
-          echo "✓ Build successful"
-        else
-          echo "❌ Build failed with status: $BUILD_STATUS"
-          exit $BUILD_STATUS
-        fi
 
     - name: Locate compiled binary
       run: |
@@ -104,8 +90,6 @@ jobs:
 
         if [ -z "$ADBD_PATH" ]; then
           echo "❌ adbd binary not found!"
-          echo "Checking build output directory:"
-          find ~/aosp/out/target/product -type f -name "adbd*" 2>/dev/null || echo "No adbd found"
           exit 1
         fi
 
@@ -113,20 +97,8 @@ jobs:
         file "$ADBD_PATH"
         ls -lh "$ADBD_PATH"
 
-        # Copy to workspace
         cp "$ADBD_PATH" adbd_arm64
         echo "✓ Copied to workspace"
-
-    - name: Verify binary
-      run: |
-        echo "Binary information:"
-        file adbd_arm64
-        echo ""
-        echo "Size:"
-        ls -lh adbd_arm64
-        echo ""
-        echo "Architecture:"
-        readelf -h adbd_arm64 2>/dev/null | grep Machine || echo "readelf not available"
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
@@ -135,8 +107,6 @@ jobs:
         name: adbd-arm64
         path: adbd_arm64
         retention-days: 30
-        if-no-files-found: error
-        overwrite: true
 
     - name: Create Release
       if: success()
@@ -146,8 +116,6 @@ jobs:
         tag_name: v${{ github.run_number }}
         body: |
           # ADB ARM64 Build #${{ github.run_number }}
-
-          自动编译的 ADB ARM64 二进制文件
 
           **修改说明:**
           - ✓ 禁用授权检查 (auth_required = false)
@@ -162,26 +130,8 @@ jobs:
           ```
 
           **编译信息:**
-          - 编译时间: ${{ job.started_at }}
-          - 构建 ID: ${{ github.run_id }}
           - 架构: ARM64 (aarch64)
           - API 级别: 30+
-          - 文件大小: $(ls -lh adbd_arm64 | awk '{print $5}')
-
-          **验证:**
-          ```bash
-          file adbd_arm64
-          # 应该输出: ELF 64-bit LSB executable, ARM aarch64
-          ```
+          - 编译 ID: ${{ github.run_id }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Send notification
-      if: always()
-      run: |
-        if [ ${{ job.status }} == 'success' ]; then
-          echo "✅ Build succeeded!"
-          echo "Download the artifact from Actions or Releases"
-        else
-          echo "❌ Build failed!"
-        fi
