@@ -1,0 +1,131 @@
+name: Build and Cache AOSP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-cache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 480
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Free disk space
+      run: |
+        echo "=== Freeing disk space ==="
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+        sudo rm -rf /usr/share/swift /usr/local/share/powershell /usr/local/graalvm
+        sudo rm -rf /opt/miniconda /opt/pipelines
+        docker image prune -a -f
+        sudo apt-get clean
+        sudo apt-get autoclean
+        df -h
+
+    - name: Install dependencies
+      run: |
+        echo "=== Installing dependencies ==="
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends \
+          openjdk-11-jdk python3-dev \
+          git curl repo \
+          build-essential libssl-dev bc bison flex ccache
+
+    - name: Setup git
+      run: |
+        git config --global user.email "build@example.com"
+        git config --global user.name "Builder"
+        git config --global gc.autodetach false
+        git config --global url."https://android.googlesource.com/".insteadOf "ssh://android.googlesource.com/"
+
+    - name: Initialize AOSP
+      run: |
+        echo "=== Initializing AOSP ==="
+        mkdir -p ~/aosp
+        cd ~/aosp
+        repo init -u https://android.googlesource.com/platform/manifest \
+                  -b android-13.0.0_r1 --depth=1 2>&1 | tail -5
+
+    - name: Sync AOSP (attempt 1/3)
+      timeout-minutes: 120
+      run: |
+        cd ~/aosp
+        echo "=== Syncing AOSP (attempt 1/3) ==="
+        timeout 3600 repo sync -j4 --no-tags --no-clone-bundle -q || true
+        [ -f "build/envsetup.sh" ] && echo "✓ Sync successful" && exit 0 || echo "⚠ Sync failed, retrying..."
+
+    - name: Sync AOSP (attempt 2/3)
+      timeout-minutes: 120
+      if: always()
+      run: |
+        cd ~/aosp
+        [ -f "build/envsetup.sh" ] && echo "✓ Already synced" && exit 0
+        echo "=== Syncing AOSP (attempt 2/3) ==="
+        timeout 3600 repo sync -j4 --no-tags --no-clone-bundle -q || true
+        [ -f "build/envsetup.sh" ] && echo "✓ Sync successful" && exit 0 || echo "⚠ Sync failed, retrying..."
+
+    - name: Sync AOSP (attempt 3/3)
+      timeout-minutes: 120
+      if: always()
+      run: |
+        cd ~/aosp
+        [ -f "build/envsetup.sh" ] && echo "✓ Already synced" && exit 0
+        echo "=== Syncing AOSP (attempt 3/3) ==="
+        timeout 3600 repo sync -j4 --no-tags --no-clone-bundle -q || true
+        [ -f "build/envsetup.sh" ] || exit 1
+        echo "✓ Sync successful"
+
+    - name: Copy modified ADB
+      run: |
+        cd ~/aosp
+        rm -rf packages/modules/adb
+        cp -r $GITHUB_WORKSPACE packages/modules/adb
+        echo "✓ Modified ADB copied"
+
+    - name: Compile ADB
+      run: |
+        cd ~/aosp
+        echo "=== Building ADB ==="
+        bash -c '
+          set -e
+          source build/envsetup.sh > /dev/null 2>&1
+          lunch aosp_arm64-eng > /dev/null 2>&1
+          m adbd -j$(nproc) 2>&1 | tail -50
+        '
+        echo "✓ Build completed"
+
+    - name: Create cache archive
+      run: |
+        echo "=== Creating cache archive ==="
+        cd ~/aosp
+        tar -czf aosp-android13.tar.gz \
+          .repo/ build/ system/ frameworks/ prebuilts/ \
+          packages/modules/adb/ external/ bionic/ \
+          --exclude='.repo/project-objects' \
+          --exclude='.repo/projects' \
+          2>/dev/null || true
+
+        if [ -f "aosp-android13.tar.gz" ]; then
+          SIZE=$(du -h aosp-android13.tar.gz | cut -f1)
+          echo "✓ Cache created: $SIZE"
+          cp aosp-android13.tar.gz $GITHUB_WORKSPACE/
+        else
+          echo "❌ Cache creation failed"
+          exit 1
+        fi
+
+    - name: Upload cache to release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: aosp-android13.tar.gz
+        tag_name: aosp-cache
+        name: "AOSP Android 13 Cache"
+        body: |
+          Pre-cached AOSP Android 13 sources for faster builds.
+
+          This cache is used by the build workflow to speed up compilation.
+        draft: false
+        prerelease: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
