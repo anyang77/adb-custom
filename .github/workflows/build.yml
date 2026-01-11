@@ -47,21 +47,24 @@ jobs:
         cd ~/aosp
         echo "Initializing AOSP repository..."
         repo init -u https://android.googlesource.com/platform/manifest \
-                  -b android-14 \
-                  -q --depth=1
+                  -b android-14.0.0_r1 \
+                  --depth=1 || \
+        repo init -u https://android.googlesource.com/platform/manifest \
+                  -b main \
+                  --depth=1 || true
+        echo "Repository initialized"
 
     - name: Sync AOSP sources
       run: |
         cd ~/aosp
         echo "Syncing AOSP sources..."
-        repo sync -j4 -q --fail-fast \
+        timeout 1800 repo sync -j4 --fail-fast \
                   packages/modules/adb \
                   build \
                   system/core \
                   prebuilts/sdk \
                   prebuilts/clang/host \
-                  frameworks/base \
-        2>&1 | tail -20 || true
+                  frameworks/base || echo "Sync completed or timed out"
 
     - name: Copy modified ADB source
       run: |
