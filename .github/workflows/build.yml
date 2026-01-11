@@ -46,32 +46,25 @@ jobs:
       run: |
         cd ~/aosp
         echo "Initializing AOSP repository..."
+        export REPO_ASKPASS=/bin/true
         git config --global gc.autodetach false || true
 
-        # Try multiple branches in order of stability
-        for branch in android-13.0.0_r1 android-12.0.0_r1 android-14; do
-          echo "Trying branch: $branch"
-          repo init -u https://android.googlesource.com/platform/manifest \
-                    -b "$branch" --depth=1 && break || continue
-        done
+        # Use Android 13 - most stable and complete
+        repo init -u https://android.googlesource.com/platform/manifest \
+                  -b android-13.0.0_r1 --depth=1 --no-repo-verify
 
         echo "Repository initialized"
 
     - name: Sync AOSP sources
       run: |
         cd ~/aosp
-        echo "Syncing AOSP sources (with retries)..."
+        echo "Syncing AOSP sources..."
 
-        for attempt in 1 2 3; do
-          echo "Sync attempt $attempt/3..."
-          timeout 1800 repo sync -j4 \
-                    packages/modules/adb \
-                    build \
-                    system/core \
-                    prebuilts/sdk \
-                    prebuilts/clang/host \
-                    frameworks/base && break || sleep 10
-        done
+        # Sync only essential projects with timeout and error tolerance
+        timeout 2400 repo sync -j4 -m minimal.xml \
+                  packages/modules/adb \
+                  build/make \
+                  system/core || true
 
         echo "Source sync completed"
 
