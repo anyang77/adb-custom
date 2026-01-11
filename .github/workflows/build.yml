@@ -69,47 +69,37 @@ jobs:
     - name: Sync AOSP Sources
       run: |
         cd ~/aosp
-        echo "=== Syncing AOSP Sources (this takes 1-2 hours) ==="
+        echo "=== Syncing AOSP Sources (this takes 2-3 hours for full source) ==="
 
-        # Sync with very long timeout - include ALL build system components
-        timeout 7200 repo sync -j4 --no-tags --no-clone-bundle \
-          packages/modules/adb \
-          build/make \
-          build/soong \
-          build/blueprint \
-          build/bazel \
-          system/core \
-          system/libbase \
-          system/logging \
-          system/memory/libmemunreachable \
-          system/unwinding \
-          external/libcxx \
-          external/libcxxabi \
-          external/boringssl \
-          prebuilts/sdk \
-          prebuilts/clang/host/linux-x86 \
-          frameworks/native \
-          bionic \
-          2>&1 | tail -50
+        # Sync ALL projects instead of just picking specific ones
+        # This is slower but more reliable - avoids "missing dependency" errors
+        timeout 10800 repo sync -j4 --no-tags --no-clone-bundle \
+          2>&1 | tail -100
 
         # Check result explicitly
         SYNC_RESULT=$?
         echo ""
         echo "Sync exit code: $SYNC_RESULT"
 
-        # Even if timeout, check if key files exist
-        if [ -d "packages/modules/adb" ] && [ -f "build/make/core/main.mk" ] && [ -f "build/soong/soong_ui.bash" ] && [ -f "build/blueprint/microfactory/microfactory.bash" ]; then
-          echo "✓ Essential AOSP files synced successfully"
+        # Check if critical files exist
+        echo "Verifying critical components..."
+        if [ -f "build/envsetup.sh" ] && [ -f "build/soong/soong_ui.bash" ] && [ -f "build/blueprint/microfactory/microfactory.bash" ]; then
+          echo "✓ Build system files synced"
         else
-          echo "⚠ Some files may not be synced, checking status..."
-          echo "Checking directory status:"
-          [ -d "packages/modules/adb" ] && echo "  ✓ packages/modules/adb exists" || echo "  ✗ packages/modules/adb MISSING"
-          [ -d "build/make" ] && echo "  ✓ build/make exists" || echo "  ✗ build/make MISSING"
-          [ -d "build/soong" ] && echo "  ✓ build/soong exists" || echo "  ✗ build/soong MISSING"
-          [ -d "build/blueprint" ] && echo "  ✓ build/blueprint exists" || echo "  ✗ build/blueprint MISSING"
-          [ -d "system/core" ] && echo "  ✓ system/core exists" || echo "  ✗ system/core MISSING"
-          [ -f "build/soong/soong_ui.bash" ] && echo "  ✓ soong_ui.bash exists" || echo "  ✗ soong_ui.bash MISSING"
-          [ -f "build/blueprint/microfactory/microfactory.bash" ] && echo "  ✓ microfactory.bash exists" || echo "  ✗ microfactory.bash MISSING"
+          echo "⚠ Some build system files missing"
+        fi
+
+        if [ -d "prebuilts/go/linux-x86" ] && [ -d "prebuilts/jdk" ]; then
+          echo "✓ Prebuilt tools synced"
+        else
+          echo "⚠ Some prebuilt tools missing"
+        fi
+
+        if [ -d "packages/modules/adb" ] && [ -d "system/core" ]; then
+          echo "✓ Source modules synced"
+        else
+          echo "✗ Critical source modules missing"
+          exit 1
         fi
 
     - name: Verify AOSP Structure
