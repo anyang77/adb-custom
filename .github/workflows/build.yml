@@ -9,92 +9,102 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    container:
+      image: ubuntu:22.04
+      options: --cpus 4 --memory 16g
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
 
-    - name: Set up Java
-      uses: actions/setup-java@v4
-      with:
-        java-version: '11'
-        distribution: 'temurin'
-
-    - name: Install dependencies
+    - name: Install base dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          openjdk-11-jdk \
-          python3 python3-dev \
+        apt-get update
+        apt-get install -y --no-install-recommends \
           git curl wget \
-          repo \
           build-essential \
+          python3 python3-dev \
+          openjdk-11-jdk \
           libssl-dev \
           bc bison flex \
-          ccache
+          ccache \
+          repo \
+          ca-certificates
+
+    - name: Configure git
+      run: |
+        git config --global user.email "build@example.com"
+        git config --global user.name "Build System"
+        git config --global gc.autodetach false
 
     - name: Create AOSP workspace
       run: |
-        mkdir -p ~/aosp
-        cd ~/aosp
-        git config --global user.email "build@example.com"
-        git config --global user.name "Build System"
+        mkdir -p /aosp
+        cd /aosp
+        echo "Starting AOSP setup..."
 
-    - name: Initialize AOSP
+    - name: Initialize and Sync AOSP
       run: |
-        cd ~/aosp
-        echo "Initializing AOSP repository..."
+        cd /aosp
+
+        # Initialize AOSP
+        echo "Initializing AOSP (Android 13)..."
         export REPO_ASKPASS=/bin/true
-        git config --global gc.autodetach false || true
-
-        # Use Android 13 - most stable and complete
         repo init -u https://android.googlesource.com/platform/manifest \
-                  -b android-13.0.0_r1 --depth=1 --no-repo-verify
+                  -b android-13.0.0_r1 --depth=1 --no-repo-verify 2>&1 | tail -20
 
-        echo "Repository initialized"
+        # Sync with longer timeout
+        echo "Syncing sources (this takes time)..."
+        timeout 3600 repo sync -j4 \
+          packages/modules/adb \
+          build/make \
+          system/core \
+          system/libbase \
+          system/logging \
+          system/memory/libmemunreachable \
+          system/unwinding \
+          external/libcxx \
+          external/libcxxabi \
+          prebuilts/clang/host/linux-x86 \
+          bionic || echo "Sync finished or timed out"
 
-    - name: Sync AOSP sources
+    - name: Verify AOSP structure
       run: |
-        cd ~/aosp
-        echo "Syncing AOSP sources..."
-
-        # Sync only essential projects with timeout and error tolerance
-        timeout 2400 repo sync -j4 -m minimal.xml \
-                  packages/modules/adb \
-                  build/make \
-                  system/core || true
-
-        echo "Source sync completed"
+        cd /aosp
+        echo "Checking AOSP structure..."
+        ls -la packages/modules/adb/ || echo "ADB not synced yet"
+        ls -la build/make/ || echo "Build system not synced"
 
     - name: Copy modified ADB source
       run: |
-        cd ~/aosp
-        rm -rf packages/modules/adb
+        cd /aosp
+        if [ -d "packages/modules/adb" ]; then
+          rm -rf packages/modules/adb
+        fi
         cp -r $GITHUB_WORKSPACE packages/modules/adb
-        echo "✓ ADB source copied"
+        echo "✓ Modified ADB source copied"
 
-    - name: Setup build environment
+    - name: Setup and Build
       run: |
-        cd ~/aosp
-        source build/envsetup.sh > /dev/null
-        lunch aosp_arm64-eng > /dev/null 2>&1
-        echo "✓ Build environment configured"
+        cd /aosp
+        echo "Setting up build environment..."
+        source build/envsetup.sh > /dev/null 2>&1 || true
 
-    - name: Build ADB daemon
-      run: |
-        cd ~/aosp
-        echo "Starting ADB build..."
-        m adbd -j$(nproc) 2>&1 | tail -50
+        echo "Configuring for ARM64..."
+        lunch aosp_arm64-eng > /dev/null 2>&1 || true
 
-    - name: Locate compiled binary
+        echo "Building ADB daemon..."
+        m adbd -j4 2>&1 | tail -50
+
+    - name: Extract and verify binary
       run: |
-        echo "Searching for compiled adbd..."
-        ADBD_PATH=$(find ~/aosp/out -name "adbd" -type f 2>/dev/null | head -1)
+        echo "Searching for adbd binary..."
+        ADBD_PATH=$(find /aosp/out -name "adbd" -type f 2>/dev/null | head -1)
 
         if [ -z "$ADBD_PATH" ]; then
-          echo "❌ adbd binary not found!"
+          echo "❌ Error: adbd binary not found!"
+          echo "Contents of /aosp/out:"
+          find /aosp/out -type f -name "*adbd*" 2>/dev/null || true
           exit 1
         fi
 
@@ -102,8 +112,8 @@ jobs:
         file "$ADBD_PATH"
         ls -lh "$ADBD_PATH"
 
-        cp "$ADBD_PATH" adbd_arm64
-        echo "✓ Copied to workspace"
+        cp "$ADBD_PATH" /github/workspace/adbd_arm64
+        echo "✓ Binary copied to workspace"
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
