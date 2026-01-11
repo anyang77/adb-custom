@@ -1,182 +1,294 @@
-name: Build ADB ARM64
+name: Build ADB ARM64 (Stable)
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 480
 
     steps:
-    - name: Checkout
+    - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+
+    - name: Free disk space
+      run: |
+        echo "=== Current disk usage ==="
+        df -h
+
+        echo ""
+        echo "=== Removing unnecessary files ==="
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /opt/hostedtoolcache
+        docker image prune -a -f
+
+        echo ""
+        echo "=== Available space ==="
+        df -h
 
     - name: Install dependencies
       run: |
+        echo "=== Installing system dependencies ==="
         sudo apt-get update -qq
-        sudo apt-get install -y \
-          openjdk-11-jdk python3-dev \
-          git curl repo \
-          build-essential libssl-dev bc bison flex ccache
+        sudo apt-get install -y --no-install-recommends \
+          openjdk-11-jdk-headless \
+          python3 python3-dev python3-distutils \
+          git curl wget \
+          build-essential libssl-dev \
+          bc bison flex ccache \
+          liblz4-tool rsync \
+          2>&1 | grep -E "^(Get:|Setting up)" | tail -10
 
-    - name: Setup git
+        echo ""
+        echo "=== Installing repo tool ==="
+        mkdir -p ~/bin
+        curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        chmod a+x ~/bin/repo
+        export PATH="$HOME/bin:$PATH"
+
+        echo "✓ Dependencies installed"
+
+    - name: Configure environment
       run: |
-        git config --global user.email "build@example.com"
-        git config --global user.name "Builder"
+        echo "=== Configuring git ==="
+        git config --global user.email "build@github.com"
+        git config --global user.name "GitHub Builder"
         git config --global gc.autodetach false
         git config --global url."https://android.googlesource.com/".insteadOf "ssh://android.googlesource.com/"
+        git config --global http.postBuffer 524288000
+        git config --global http.lowSpeedLimit 0
+        git config --global http.lowSpeedTime 999999
 
-    - name: Check for cached AOSP
-      id: cache-check
-      run: |
-        # 检查是否有缓存的 AOSP
-        RELEASE_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/aosp-cache"
-        if curl -s -f "$RELEASE_URL" > /dev/null; then
-          echo "has_cache=true" >> $GITHUB_OUTPUT
-          echo "✓ Found cached AOSP"
-        else
-          echo "has_cache=false" >> $GITHUB_OUTPUT
-          echo "⚠ No cached AOSP, will sync fresh"
-        fi
+        export PATH="$HOME/bin:$PATH"
+        echo "PATH=$PATH" >> $GITHUB_ENV
 
-    - name: Download cached AOSP
-      if: steps.cache-check.outputs.has_cache == 'true'
+        echo "✓ Environment configured"
+
+    - name: Initialize AOSP
       run: |
-        echo "=== Downloading cached AOSP ==="
+        echo "=== Initializing AOSP Android 13 ==="
         mkdir -p ~/aosp
         cd ~/aosp
 
-        # 从 Releases 下载缓存
-        wget -q --show-progress https://github.com/${{ github.repository }}/releases/download/aosp-cache/aosp-android13.tar.gz || {
-          echo "⚠ Failed to download cache, will sync fresh"
-          exit 1
-        }
+        export PATH="$HOME/bin:$PATH"
 
-        tar -xzf aosp-android13.tar.gz
-        rm aosp-android13.tar.gz
-        echo "✓ Cache extracted"
+        ~/bin/repo init \
+          -u https://android.googlesource.com/platform/manifest \
+          -b android-13.0.0_r1 \
+          --depth=1 \
+          -j 4 \
+          2>&1 | tail -5
 
-    - name: Fresh sync (if no cache)
-      if: steps.cache-check.outputs.has_cache != 'true'
+        echo "✓ AOSP initialized"
+
+    - name: Sync AOSP sources
       timeout-minutes: 120
       run: |
-        echo "=== Fresh AOSP sync (first time) ==="
-        mkdir -p ~/aosp
+        echo "=== Syncing AOSP sources ==="
         cd ~/aosp
 
-        repo init -u https://android.googlesource.com/platform/manifest \
-                  -b android-13.0.0_r1 --depth=1 2>&1 | tail -5
+        export PATH="$HOME/bin:$PATH"
 
-        echo "Syncing (attempt 1/3)..."
-        timeout 4800 repo sync -j4 --no-tags --no-clone-bundle || {
-          echo "Syncing (attempt 2/3)..."
-          timeout 4800 repo sync -j4 --no-tags --no-clone-bundle || {
-            echo "Syncing (attempt 3/3)..."
-            timeout 4800 repo sync -j4 --no-tags --no-clone-bundle || true
-          }
-        }
+        ATTEMPT=0
+        MAX_ATTEMPTS=3
 
-        # 验证关键文件
+        while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+          ATTEMPT=$((ATTEMPT + 1))
+          echo ""
+          echo "Sync attempt $ATTEMPT/$MAX_ATTEMPTS"
+
+          if timeout 3600 ~/bin/repo sync \
+            -j 4 \
+            --no-tags \
+            --no-clone-bundle \
+            -q 2>&1 | tail -20; then
+
+            if [ -f "build/envsetup.sh" ]; then
+              echo "✓ Sync successful"
+              break
+            fi
+          fi
+
+          if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+            echo "⚠ Sync attempt $ATTEMPT failed, retrying in 30 seconds..."
+            sleep 30
+          fi
+        done
+
         if [ ! -f "build/envsetup.sh" ]; then
-          echo "❌ AOSP sync failed"
+          echo "❌ Failed to sync AOSP after $MAX_ATTEMPTS attempts"
           exit 1
         fi
-        echo "✓ AOSP synced"
+
+        echo ""
+        echo "=== AOSP sync complete ==="
+        ls -lh build/envsetup.sh
 
     - name: Copy modified ADB
       run: |
+        echo "=== Copying modified ADB sources ==="
         cd ~/aosp
-        rm -rf packages/modules/adb
-        cp -r $GITHUB_WORKSPACE packages/modules/adb
-        echo "✓ Modified ADB copied"
 
-    - name: Compile ADB
+        if [ -d "packages/modules/adb" ]; then
+          rm -rf packages/modules/adb.backup
+          mv packages/modules/adb packages/modules/adb.backup
+        fi
+
+        mkdir -p packages/modules
+        cp -r $GITHUB_WORKSPACE packages/modules/adb
+
+        echo "✓ ADB sources copied"
+        echo ""
+        echo "Modified sources:"
+        find packages/modules/adb -type f \( -name "*.cpp" -o -name "*.h" \) | head -20
+
+    - name: Build ADB ARM64
+      timeout-minutes: 120
       run: |
+        echo "=== Building ADB ARM64 ==="
         cd ~/aosp
-        echo "=== Building ADB ==="
 
         bash -c '
           set -e
+
+          echo ""
+          echo "Loading build environment..."
           source build/envsetup.sh > /dev/null 2>&1
+
+          echo "Setting target configuration..."
           lunch aosp_arm64-eng > /dev/null 2>&1
-          m adbd -j$(nproc) 2>&1 | tail -50
-        ' || exit 1
 
-        echo "✓ Build completed"
+          echo ""
+          echo "=== Build Configuration ==="
+          echo "Target Device: $(get_build_var TARGET_DEVICE)"
+          echo "Product: $(get_build_var PRODUCT)"
+          echo "Variant: $(get_build_var TARGET_BUILD_VARIANT)"
+          echo "Build Threads: $(nproc)"
+          echo ""
 
-    - name: Extract binary
+          echo "Starting build..."
+          m adbd -j$(nproc) 2>&1 | tail -100
+
+          echo ""
+          echo "✓ Build completed successfully"
+        '
+
+    - name: Extract and verify binary
       run: |
+        echo "=== Extracting binary ==="
         cd ~/aosp
+
         ADBD_PATH=$(find out -name "adbd" -type f 2>/dev/null | head -1)
-        [ -n "$ADBD_PATH" ] || (echo "❌ adbd not found"; exit 1)
-        cp "$ADBD_PATH" $GITHUB_WORKSPACE/adbd_arm64
-        echo "✓ Binary extracted"
 
-    - name: Create AOSP cache (if first time)
-      if: steps.cache-check.outputs.has_cache != 'true'
-      continue-on-error: true
-      run: |
-        echo "=== Creating AOSP cache ==="
-        cd ~/aosp
-
-        # 压缩必要的文件（约 50GB）
-        tar -czf aosp-android13.tar.gz .repo/ build/ system/ frameworks/ prebuilts/ packages/modules/adb/ external/ bionic/ 2>/dev/null || {
-          echo "⚠ Cache creation failed, skipping"
-        }
-
-        if [ -f "aosp-android13.tar.gz" ]; then
-          mv aosp-android13.tar.gz $GITHUB_WORKSPACE/
-          echo "✓ Cache created ($(du -h aosp-android13.tar.gz | cut -f1))"
+        if [ -z "$ADBD_PATH" ]; then
+          echo "❌ adbd binary not found"
+          echo ""
+          echo "Searching for binaries..."
+          find out -name "adbd*" 2>/dev/null | head -10
+          exit 1
         fi
+
+        echo "Found: $ADBD_PATH"
+        echo ""
+        echo "Binary information:"
+        file "$ADBD_PATH"
+        ls -lh "$ADBD_PATH"
+
+        echo ""
+        echo "Copying to workspace..."
+        cp "$ADBD_PATH" $GITHUB_WORKSPACE/adbd_arm64
+
+        echo ""
+        echo "=== Output File ==="
+        ls -lh $GITHUB_WORKSPACE/adbd_arm64
+        file $GITHUB_WORKSPACE/adbd_arm64
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
+      if: success()
       with:
-        name: adbd-arm64
+        name: adbd-arm64-${{ github.run_number }}
         path: adbd_arm64
+        retention-days: 30
+        compression-level: 0
 
-    - name: Create/Update cache release
-      if: steps.cache-check.outputs.has_cache != 'true' && hashFiles('aosp-android13.tar.gz') != ''
-      continue-on-error: true
+    - name: Create release
       uses: softprops/action-gh-release@v2
-      with:
-        files: aosp-android13.tar.gz
-        tag_name: aosp-cache
-        name: "AOSP Android 13 Cache"
-        body: |
-          Pre-cached AOSP Android 13 sources for faster builds.
-
-          This is automatically updated on successful compilation.
-        draft: false
-        prerelease: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Create ADB release
-      uses: softprops/action-gh-release@v2
+      if: success() && github.event_name == 'push'
       with:
         files: adbd_arm64
         tag_name: v${{ github.run_number }}
+        generate_release_notes: true
         body: |
           # ADB ARM64 Build #${{ github.run_number }}
 
-          **Modifications:**
-          - ✓ Auth disabled (auth_required = false)
-          - ✓ Always root (should_drop_privileges() = false)
-          - ✓ No system properties dependency
+          **Build Details:**
+          - **Workflow:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          - **Commit:** ${{ github.sha }}
+          - **Branch:** ${{ github.ref_name }}
+          - **Timestamp:** ${{ github.event.head_commit.timestamp }}
 
-          **Deploy to device:**
+          **Binary Details:**
+          - **Architecture:** ARM64 (aarch64)
+          - **API Level:** 30+
+          - **Build Type:** eng (engineer)
+          - **Android Version:** 13
+
+          **Installation:**
           ```bash
-          adb push adbd_arm64 /system/bin/adbd
-          adb shell chmod 755 /system/bin/adbd
+          adb push adbd_arm64 /data/local/tmp/adbd_new
+          adb shell chmod 755 /data/local/tmp/adbd_new
+
+          # Test it first
+          adb shell /data/local/tmp/adbd_new --version
+
+          # If successful, replace the original
+          adb shell su -c "cp /data/local/tmp/adbd_new /system/bin/adbd"
           adb reboot
           ```
 
-          **Architecture:** ARM64 (aarch64)
-          **API Level:** 30+
-          **Build ID:** ${{ github.run_id }}
+          **Troubleshooting:**
+          - If push fails, try `adb push adbd_arm64 /system/bin/adbd` directly (with root)
+          - Check permissions: `adb shell ls -l /system/bin/adbd`
+          - Verify binary: `adb shell file /system/bin/adbd`
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build summary
+      if: always()
+      run: |
+        echo ""
+        echo "========================================="
+        echo "BUILD SUMMARY"
+        echo "========================================="
+        echo "Status: ${{ job.status }}"
+        echo "Run ID: ${{ github.run_id }}"
+        echo "Timestamp: $(date)"
+        echo ""
+
+        if [ -f "adbd_arm64" ]; then
+          echo "✓ Binary generated successfully"
+          echo ""
+          echo "File: adbd_arm64"
+          ls -lh adbd_arm64
+          file adbd_arm64
+        else
+          echo "✗ Binary not found"
+        fi
+
+        echo ""
+        echo "Disk usage:"
+        df -h | head -2

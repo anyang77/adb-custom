@@ -1,0 +1,255 @@
+name: Build ADB ARM64 (Docker)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 480
+
+    # 使用 Docker 容器确保环境一致
+    container:
+      image: ubuntu:22.04
+      options: --memory 16g --cpus 4
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: System setup
+      run: |
+        apt-get update -qq
+        apt-get install -y --no-install-recommends \
+          openjdk-11-jdk-headless \
+          python3 python3-dev python3-distutils \
+          git curl wget \
+          build-essential libssl-dev \
+          bc bison flex ccache \
+          liblz4-tool \
+          rsync \
+          2>&1 | tail -3
+        echo "✓ System dependencies installed"
+
+    - name: Setup git configuration
+      run: |
+        git config --global user.email "build@github.com"
+        git config --global user.name "GitHub Builder"
+        git config --global gc.autodetach false
+        git config --global url."https://android.googlesource.com/".insteadOf "ssh://android.googlesource.com/"
+        git config --global http.postBuffer 524288000
+        git config --global http.lowSpeedLimit 0
+        git config --global http.lowSpeedTime 999999
+        echo "✓ Git configured"
+
+    - name: Install repo tool
+      run: |
+        mkdir -p /root/bin
+        curl -s https://storage.googleapis.com/git-repo-downloads/repo > /root/bin/repo
+        chmod a+x /root/bin/repo
+        export PATH="/root/bin:$PATH"
+        repo --version
+        echo "✓ Repo tool installed"
+
+    - name: Prepare AOSP workspace
+      id: prepare
+      run: |
+        mkdir -p /aosp
+        cd /aosp
+
+        # 初始化 AOSP 仓库
+        echo "=== Initializing AOSP Android 13 ==="
+        /root/bin/repo init \
+          -u https://android.googlesource.com/platform/manifest \
+          -b android-13.0.0_r1 \
+          --depth=1 \
+          -j 4 \
+          2>&1 | grep -E "(Initialize|Fetching|Done)" | tail -5
+
+        echo "✓ AOSP initialized"
+
+    - name: Sync AOSP sources (with retry)
+      run: |
+        cd /aosp
+        export PATH="/root/bin:$PATH"
+
+        echo "=== Syncing AOSP sources ==="
+
+        # 第一次尝试，有超时控制
+        if timeout 3600 /root/bin/repo sync \
+          -j 4 \
+          --no-tags \
+          --no-clone-bundle \
+          -q \
+          2>&1 | tail -20; then
+          echo "✓ Sync completed successfully"
+        else
+          echo "⚠ First sync attempt timeout, retrying..."
+          # 继续同步，不重新初始化
+          timeout 3600 /root/bin/repo sync \
+            -j 4 \
+            --no-tags \
+            --no-clone-bundle \
+            -q \
+            2>&1 | tail -20 || true
+        fi
+
+        # 验证关键文件
+        if [ -f "build/envsetup.sh" ]; then
+          echo "✓ AOSP sources verified"
+          ls -lh build/envsetup.sh
+        else
+          echo "❌ AOSP sync failed: build/envsetup.sh not found"
+          exit 1
+        fi
+
+    - name: Copy modified ADB sources
+      run: |
+        cd /aosp
+
+        # 备份原始 ADB
+        if [ -d "packages/modules/adb" ]; then
+          rm -rf packages/modules/adb.bak
+          mv packages/modules/adb packages/modules/adb.bak
+        fi
+
+        # 复制修改后的 ADB
+        mkdir -p packages/modules
+        cp -r $GITHUB_WORKSPACE packages/modules/adb
+
+        echo "✓ Modified ADB sources copied"
+        echo ""
+        echo "Modified files:"
+        find packages/modules/adb -name "*.cpp" -o -name "*.h" | head -10
+
+    - name: Build ADB daemon (adbd) ARM64
+      run: |
+        cd /aosp
+        export PATH="/root/bin:$PATH"
+
+        echo "=== Building ADB ARM64 ==="
+        echo ""
+
+        # 设置编译环境
+        bash -c '
+          set -e
+
+          # 加载编译环境
+          source build/envsetup.sh > /dev/null 2>&1
+
+          # 选择 ARM64 编译配置
+          lunch aosp_arm64-eng > /dev/null 2>&1
+
+          echo "Target: $(get_build_var TARGET_DEVICE)"
+          echo "Product: $(get_build_var PRODUCT)"
+          echo "Variant: $(get_build_var TARGET_BUILD_VARIANT)"
+          echo ""
+          echo "=== Starting compilation ==="
+
+          # 编译 adbd
+          m adbd -j$(nproc) 2>&1 | tail -100
+
+          echo ""
+          echo "✓ Build completed"
+        ' || {
+          echo "❌ Build failed"
+          exit 1
+        }
+
+    - name: Locate compiled binary
+      id: locate
+      run: |
+        cd /aosp
+
+        echo "=== Searching for adbd binary ==="
+
+        # 查找 adbd
+        ADBD_PATH=$(find out -name "adbd" -type f 2>/dev/null | head -1)
+
+        if [ -z "$ADBD_PATH" ]; then
+          echo "❌ adbd binary not found"
+          echo ""
+          echo "Available binaries:"
+          find out -name "adbd*" 2>/dev/null | head -10
+          exit 1
+        fi
+
+        echo "✓ Found: $ADBD_PATH"
+
+        # 验证二进制文件
+        if file "$ADBD_PATH" | grep -q "ELF.*ARM aarch64"; then
+          echo "✓ Binary verified as ARM64 ELF"
+        else
+          file "$ADBD_PATH"
+        fi
+
+        # 复制到工作目录
+        cp "$ADBD_PATH" $GITHUB_WORKSPACE/adbd_arm64
+
+        # 输出信息
+        ls -lh $GITHUB_WORKSPACE/adbd_arm64
+        echo ""
+        echo "binary_path=$ADBD_PATH" >> $GITHUB_OUTPUT
+
+    - name: Create release
+      uses: softprops/action-gh-release@v2
+      if: success()
+      with:
+        files: adbd_arm64
+        tag_name: v${{ github.run_number }}
+        generate_release_notes: true
+        body: |
+          # ADB ARM64 Build #${{ github.run_number }}
+
+          **Build Information:**
+          - Architecture: ARM64 (aarch64)
+          - API Level: 30+
+          - Build Type: eng (engineer)
+          - Build ID: ${{ github.run_id }}
+          - Timestamp: ${{ github.event.head_commit.timestamp }}
+
+          **Modifications:**
+          ✓ Custom daemon modifications applied
+          ✓ Compiled from AOSP Android 13
+
+          **Installation:**
+          ```bash
+          adb push adbd_arm64 /system/bin/adbd
+          adb shell chmod 755 /system/bin/adbd
+          adb reboot
+          ```
+
+          **Build Log:**
+          - Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: adbd-arm64-build-${{ github.run_number }}
+        path: adbd_arm64
+        retention-days: 30
+
+    - name: Build summary
+      if: always()
+      run: |
+        echo "=== Build Summary ==="
+        echo ""
+        echo "Status: ${{ job.status }}"
+        echo "Workspace: $GITHUB_WORKSPACE"
+        echo ""
+        if [ -f "adbd_arm64" ]; then
+          echo "Output binary:"
+          ls -lh adbd_arm64
+          echo ""
+          echo "Binary details:"
+          file adbd_arm64
+        else
+          echo "No binary generated"
+        fi
