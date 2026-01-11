@@ -11,66 +11,80 @@ jobs:
     timeout-minutes: 360
 
     steps:
-    - name: Checkout modified ADB source
+    - name: Checkout
       uses: actions/checkout@v4
-
-    - name: Restore AOSP cache
-      uses: actions/cache@v3
-      id: cache
-      with:
-        path: ~/aosp
-        key: aosp-android13-${{ hashFiles('.github/workflows/build.yml') }}
-        restore-keys: |
-          aosp-android13-
 
     - name: Install dependencies
       run: |
-        echo "=== Installing dependencies ==="
         sudo apt-get update -qq
         sudo apt-get install -y \
           openjdk-11-jdk python3-dev \
           git curl repo \
-          build-essential libssl-dev bc bison flex ccache || exit 1
-        echo "✓ Dependencies installed"
+          build-essential libssl-dev bc bison flex ccache
 
-    - name: Configure git
+    - name: Setup git
       run: |
         git config --global user.email "build@example.com"
         git config --global user.name "Builder"
         git config --global gc.autodetach false
         git config --global url."https://android.googlesource.com/".insteadOf "ssh://android.googlesource.com/"
 
-    - name: Initialize AOSP (if needed)
-      if: steps.cache.outputs.cache-hit != 'true'
+    - name: Check for cached AOSP
+      id: cache-check
       run: |
-        echo "=== Initializing AOSP (first time) ==="
+        # 检查是否有缓存的 AOSP
+        RELEASE_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/aosp-cache"
+        if curl -s -f "$RELEASE_URL" > /dev/null; then
+          echo "has_cache=true" >> $GITHUB_OUTPUT
+          echo "✓ Found cached AOSP"
+        else
+          echo "has_cache=false" >> $GITHUB_OUTPUT
+          echo "⚠ No cached AOSP, will sync fresh"
+        fi
+
+    - name: Download cached AOSP
+      if: steps.cache-check.outputs.has_cache == 'true'
+      run: |
+        echo "=== Downloading cached AOSP ==="
         mkdir -p ~/aosp
         cd ~/aosp
-        repo init -u https://android.googlesource.com/platform/manifest \
-                  -b android-13.0.0_r1 --depth=1 2>&1 | tail -5
-        echo "✓ AOSP initialized"
 
-    - name: Sync AOSP sources (if needed)
-      if: steps.cache.outputs.cache-hit != 'true'
+        # 从 Releases 下载缓存
+        wget -q --show-progress https://github.com/${{ github.repository }}/releases/download/aosp-cache/aosp-android13.tar.gz || {
+          echo "⚠ Failed to download cache, will sync fresh"
+          exit 1
+        }
+
+        tar -xzf aosp-android13.tar.gz
+        rm aosp-android13.tar.gz
+        echo "✓ Cache extracted"
+
+    - name: Fresh sync (if no cache)
+      if: steps.cache-check.outputs.has_cache != 'true'
       timeout-minutes: 120
       run: |
-        echo "=== Syncing AOSP sources (first time) ==="
+        echo "=== Fresh AOSP sync (first time) ==="
+        mkdir -p ~/aosp
         cd ~/aosp
-        echo "This will take 30-60 minutes on first run..."
 
-        timeout 5400 repo sync -j4 --no-tags --no-clone-bundle || {
-          echo "⚠ Sync attempt 1 timed out"
-          timeout 5400 repo sync -j4 --no-tags --no-clone-bundle || {
-            echo "⚠ Sync attempt 2 timed out"
+        repo init -u https://android.googlesource.com/platform/manifest \
+                  -b android-13.0.0_r1 --depth=1 2>&1 | tail -5
+
+        echo "Syncing (attempt 1/3)..."
+        timeout 4800 repo sync -j4 --no-tags --no-clone-bundle || {
+          echo "Syncing (attempt 2/3)..."
+          timeout 4800 repo sync -j4 --no-tags --no-clone-bundle || {
+            echo "Syncing (attempt 3/3)..."
+            timeout 4800 repo sync -j4 --no-tags --no-clone-bundle || true
           }
         }
 
-        # Verify we got the essential files
+        # 验证关键文件
         if [ ! -f "build/envsetup.sh" ]; then
-          echo "❌ AOSP sync failed - missing build/envsetup.sh"
+          echo "❌ AOSP sync failed"
           exit 1
         fi
-        echo "✓ AOSP sources synced"
+        echo "✓ AOSP synced"
 
     - name: Copy modified ADB
       run: |
@@ -79,49 +93,69 @@ jobs:
         cp -r $GITHUB_WORKSPACE packages/modules/adb
         echo "✓ Modified ADB copied"
 
-    - name: Build ADB
+    - name: Compile ADB
       run: |
         cd ~/aosp
-        echo "=== Building ADB daemon ==="
+        echo "=== Building ADB ==="
 
         bash -c '
           set -e
           source build/envsetup.sh > /dev/null 2>&1
           lunch aosp_arm64-eng > /dev/null 2>&1
-          m adbd -j$(nproc) 2>&1 | tail -100
-        ' || {
-          echo "❌ Build failed"
-          exit 1
-        }
+          m adbd -j$(nproc) 2>&1 | tail -50
+        ' || exit 1
 
         echo "✓ Build completed"
 
     - name: Extract binary
       run: |
         cd ~/aosp
-        echo "=== Extracting binary ==="
-
         ADBD_PATH=$(find out -name "adbd" -type f 2>/dev/null | head -1)
-
-        if [ -z "$ADBD_PATH" ]; then
-          echo "❌ adbd binary not found"
-          exit 1
-        fi
-
-        echo "✓ Found: $ADBD_PATH"
-        file "$ADBD_PATH"
-        ls -lh "$ADBD_PATH"
-
+        [ -n "$ADBD_PATH" ] || (echo "❌ adbd not found"; exit 1)
         cp "$ADBD_PATH" $GITHUB_WORKSPACE/adbd_arm64
+        echo "✓ Binary extracted"
+
+    - name: Create AOSP cache (if first time)
+      if: steps.cache-check.outputs.has_cache != 'true'
+      continue-on-error: true
+      run: |
+        echo "=== Creating AOSP cache ==="
+        cd ~/aosp
+
+        # 压缩必要的文件（约 50GB）
+        tar -czf aosp-android13.tar.gz .repo/ build/ system/ frameworks/ prebuilts/ packages/modules/adb/ external/ bionic/ 2>/dev/null || {
+          echo "⚠ Cache creation failed, skipping"
+        }
+
+        if [ -f "aosp-android13.tar.gz" ]; then
+          mv aosp-android13.tar.gz $GITHUB_WORKSPACE/
+          echo "✓ Cache created ($(du -h aosp-android13.tar.gz | cut -f1))"
+        fi
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: adbd-arm64
         path: adbd_arm64
-        retention-days: 30
 
-    - name: Create Release
+    - name: Create/Update cache release
+      if: steps.cache-check.outputs.has_cache != 'true' && hashFiles('aosp-android13.tar.gz') != ''
+      continue-on-error: true
+      uses: softprops/action-gh-release@v2
+      with:
+        files: aosp-android13.tar.gz
+        tag_name: aosp-cache
+        name: "AOSP Android 13 Cache"
+        body: |
+          Pre-cached AOSP Android 13 sources for faster builds.
+
+          This is automatically updated on successful compilation.
+        draft: false
+        prerelease: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Create ADB release
       uses: softprops/action-gh-release@v2
       with:
         files: adbd_arm64
@@ -130,15 +164,19 @@ jobs:
           # ADB ARM64 Build #${{ github.run_number }}
 
           **Modifications:**
-          - ✓ Auth disabled
-          - ✓ Always root
-          - ✓ No system properties
+          - ✓ Auth disabled (auth_required = false)
+          - ✓ Always root (should_drop_privileges() = false)
+          - ✓ No system properties dependency
 
-          **Deploy:**
+          **Deploy to device:**
           ```bash
           adb push adbd_arm64 /system/bin/adbd
           adb shell chmod 755 /system/bin/adbd
           adb reboot
           ```
+
+          **Architecture:** ARM64 (aarch64)
+          **API Level:** 30+
+          **Build ID:** ${{ github.run_id }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
