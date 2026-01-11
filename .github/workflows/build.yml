@@ -31,11 +31,7 @@ jobs:
           repo \
           ca-certificates \
           openssh-client \
-          ssh-client \
-          ssh-keyscan \
-          gnupg \
-          less \
-          vim
+          gnupg
 
     - name: Configure git and SSH
       run: |
