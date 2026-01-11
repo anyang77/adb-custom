@@ -46,25 +46,34 @@ jobs:
       run: |
         cd ~/aosp
         echo "Initializing AOSP repository..."
-        repo init -u https://android.googlesource.com/platform/manifest \
-                  -b android-14.0.0_r1 \
-                  --depth=1 || \
-        repo init -u https://android.googlesource.com/platform/manifest \
-                  -b main \
-                  --depth=1 || true
+        git config --global gc.autodetach false || true
+
+        # Try multiple branches in order of stability
+        for branch in android-13.0.0_r1 android-12.0.0_r1 android-14; do
+          echo "Trying branch: $branch"
+          repo init -u https://android.googlesource.com/platform/manifest \
+                    -b "$branch" --depth=1 && break || continue
+        done
+
         echo "Repository initialized"
 
     - name: Sync AOSP sources
       run: |
         cd ~/aosp
-        echo "Syncing AOSP sources..."
-        timeout 1800 repo sync -j4 --fail-fast \
-                  packages/modules/adb \
-                  build \
-                  system/core \
-                  prebuilts/sdk \
-                  prebuilts/clang/host \
-                  frameworks/base || echo "Sync completed or timed out"
+        echo "Syncing AOSP sources (with retries)..."
+
+        for attempt in 1 2 3; do
+          echo "Sync attempt $attempt/3..."
+          timeout 1800 repo sync -j4 \
+                    packages/modules/adb \
+                    build \
+                    system/core \
+                    prebuilts/sdk \
+                    prebuilts/clang/host \
+                    frameworks/base && break || sleep 10
+        done
+
+        echo "Source sync completed"
 
     - name: Copy modified ADB source
       run: |
