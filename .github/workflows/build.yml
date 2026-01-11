@@ -2,277 +2,104 @@ name: Build ADB ARM64
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 300  # 5 hours total
+    timeout-minutes: 360  # 6 hours
 
     steps:
-    - name: Checkout code
+    - name: Checkout modified ADB source
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
 
-    - name: Set up Java
-      uses: actions/setup-java@v4
-      with:
-        java-version: '11'
-        distribution: 'temurin'
-
-    - name: Install dependencies
+    - name: Set up build environment
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          openjdk-11-jdk \
-          python3 python3-dev \
-          git curl wget \
-          repo \
-          build-essential \
-          libssl-dev \
-          bc bison flex \
-          ccache \
-          ninja-build
+          openjdk-11-jdk python3-dev \
+          git curl repo \
+          build-essential libssl-dev bc bison flex ccache
 
-    - name: Create AOSP workspace
+    - name: Configure git
+      run: |
+        git config --global user.email "build@example.com"
+        git config --global user.name "Builder"
+        git config --global gc.autodetach false
+        git config --global url."https://android.googlesource.com/".insteadOf "ssh://android.googlesource.com/"
+
+    - name: Initialize AOSP
       run: |
         mkdir -p ~/aosp
         cd ~/aosp
-        git config --global user.email "build@example.com"
-        git config --global user.name "Build System"
-        git config --global gc.autodetach false
-
-    - name: Initialize AOSP Repository
-      run: |
-        cd ~/aosp
-        echo "=== Initializing AOSP ==="
-
-        # Force HTTPS instead of SSH
-        git config --global url."https://android.googlesource.com/".insteadOf "ssh://android.googlesource.com/"
-
-        # Try Android 13
-        echo "Attempting Android 13.0.0_r1..."
+        echo "Initializing AOSP..."
         repo init -u https://android.googlesource.com/platform/manifest \
-                  -b android-13.0.0_r1 --depth=1 --no-tags 2>&1 | tail -30 && \
-        echo "✓ Android 13 init successful" || {
-          echo "Android 13 failed, trying Android 12..."
-          repo init -u https://android.googlesource.com/platform/manifest \
-                    -b android-12.0.0_r1 --depth=1 --no-tags 2>&1 | tail -30 && \
-          echo "✓ Android 12 init successful" || {
-            echo "❌ Both Android 13 and 12 failed"
-            exit 1
-          }
-        }
+                  -b android-13.0.0_r1 --depth=1 2>&1 | tail -20
 
-    - name: Sync AOSP Sources
+    - name: Sync AOSP (attempt 1/2)
+      continue-on-error: true
       run: |
         cd ~/aosp
-        echo "=== Syncing AOSP Sources (this takes 2-3 hours for full source) ==="
+        echo "Syncing AOSP sources (attempt 1)..."
+        timeout 5400 repo sync -j4 --no-tags --no-clone-bundle 2>&1 | tail -50
 
-        # Check if repo command works
-        echo "Checking repo command..."
-        repo --version || (echo "repo not available"; exit 1)
+        # Mark success
+        touch /tmp/sync_attempt1
 
-        echo "Starting sync of ALL AOSP projects..."
-        # Sync ALL projects - save output to file to avoid pipe issues
-        timeout 10800 repo sync -j4 --no-tags --no-clone-bundle > /tmp/repo_sync.log 2>&1
-        SYNC_RESULT=$?
-
-        echo ""
-        echo "Sync exit code: $SYNC_RESULT"
-
-        # Show last 50 lines of sync log
-        echo "Last 50 lines of sync output:"
-        tail -50 /tmp/repo_sync.log
-
-        # Check if sync succeeded or timed out
-        if [ $SYNC_RESULT -eq 0 ]; then
-          echo "✓ Sync completed successfully"
-        elif [ $SYNC_RESULT -eq 124 ]; then
-          echo "⚠ Sync timed out, checking if critical files were downloaded..."
-        else
-          echo "❌ Sync failed with exit code $SYNC_RESULT"
-          echo "Full log:"
-          cat /tmp/repo_sync.log | tail -200
+    - name: Sync AOSP (attempt 2/2)
+      if: ${{ !success() }}
+      run: |
+        if [ ! -f /tmp/sync_attempt1 ]; then
+          cd ~/aosp
+          echo "Syncing AOSP sources (attempt 2)..."
+          timeout 5400 repo sync -j4 --no-tags --no-clone-bundle 2>&1 | tail -50
         fi
 
-        # Check if critical files exist
-        echo ""
-        echo "Verifying critical components..."
-        if [ -f "build/envsetup.sh" ] && [ -f "build/soong/soong_ui.bash" ]; then
-          echo "✓ Build system files synced"
-        else
-          echo "✗ Build system files missing - sync failed"
-          exit 1
-        fi
-
-        if [ -d "packages/modules/adb" ] && [ -d "system/core" ]; then
-          echo "✓ Source modules synced"
-        else
-          echo "✗ Critical source modules missing"
-          exit 1
-        fi
-
-    - name: Verify AOSP Structure
+    - name: Verify AOSP structure
       run: |
         cd ~/aosp
-        echo "=== Verifying AOSP Structure ==="
+        echo "Verifying AOSP files..."
+        [ -f "build/envsetup.sh" ] && echo "✓ build/envsetup.sh" || exit 1
+        [ -d "packages/modules/adb" ] && echo "✓ packages/modules/adb" || exit 1
+        [ -d "system/core" ] && echo "✓ system/core" || exit 1
 
-        # Check critical directories
-        echo "Checking directories..."
-        for dir in packages/modules/adb build/make system/core .repo; do
-          if [ -d "$dir" ]; then
-            echo "✓ $dir"
-          else
-            echo "✗ MISSING: $dir"
-          fi
-        done
-
-        # Check key files
-        echo ""
-        echo "Checking key files..."
-        for file in build/envsetup.sh build/make/core/main.mk packages/modules/adb/Android.bp; do
-          if [ -f "$file" ]; then
-            echo "✓ $file"
-          else
-            echo "✗ MISSING: $file"
-          fi
-        done
-
-    - name: Copy Modified ADB Source
+    - name: Copy modified ADB
       run: |
         cd ~/aosp
-        echo "=== Copying Modified ADB Source ==="
-
         rm -rf packages/modules/adb
         cp -r $GITHUB_WORKSPACE packages/modules/adb
+        echo "✓ Modified ADB copied"
 
-        echo "✓ Modified ADB copied to AOSP"
-        ls -la packages/modules/adb/ | head -10
-
-    - name: Setup Build Environment
+    - name: Build ADB
       run: |
         cd ~/aosp
-        echo "=== Setting Up Build Environment ==="
-
-        # Check if build/envsetup.sh exists
-        if [ ! -f "build/envsetup.sh" ]; then
-          echo "❌ build/envsetup.sh not found!"
-          echo "Checking what was synced:"
-          ls -la build/ 2>/dev/null | head -20
-          echo ""
-          echo "AOSP root contents:"
-          ls -la ~ aosp/ | head -30
-          exit 1
-        fi
-
-        # Source the build environment
-        source build/envsetup.sh > /dev/null 2>&1 || {
-          echo "⚠ build/envsetup.sh source failed, trying with bash..."
-          bash build/envsetup.sh > /dev/null 2>&1 || true
-        }
-
-        # Try to configure for ARM64
-        if command -v lunch &> /dev/null; then
-          lunch aosp_arm64-eng > /dev/null 2>&1 || true
-          echo "✓ Build environment configured"
-        else
-          echo "⚠ lunch command not available, continuing anyway..."
-        fi
-
-    - name: Build ADB Daemon
-      run: |
-        cd ~/aosp
-        echo "=== Building ADB Daemon ==="
-
-        # Check if envsetup.sh really exists and is readable
-        if [ ! -f "build/envsetup.sh" ]; then
-          echo "❌ build/envsetup.sh NOT FOUND"
-          echo "Listing build/ directory:"
-          ls -la build/ 2>/dev/null | head -20
-          exit 1
-        fi
-
-        echo "✓ build/envsetup.sh found"
-
-        # Try to source it with debug output - capture ALL output
-        echo "Attempting to source build/envsetup.sh..."
+        echo "Building ADB daemon..."
         bash -c '
-          cd ~/aosp
-          echo "PWD: $PWD"
-          echo "Sourcing build/envsetup.sh..."
-          source build/envsetup.sh 2>&1 || exit 1
+          set -e
+          source build/envsetup.sh > /dev/null 2>&1
+          lunch aosp_arm64-eng > /dev/null 2>&1
+          m adbd -j$(nproc) 2>&1 | tail -200
+        '
 
-          echo "Lunch aosp_arm64-eng..."
-          lunch aosp_arm64-eng 2>&1 || exit 1
-
-          echo "Checking m command..."
-          which m || exit 1
-
-          echo ""
-          echo "=== Starting Build ==="
-          set -x
-          m adbd -j4
-        ' 2>&1
-
-        BUILD_RESULT=$?
-        echo ""
-        echo "Build exit code: $BUILD_RESULT"
-
-        if [ $BUILD_RESULT -ne 0 ]; then
-          echo "⚠ Build failed, checking out directory..."
-          ls -la out/ 2>/dev/null | head -20 || echo "out/ doesn't exist"
-        fi
-
-    - name: Locate and Verify Binary
+    - name: Extract binary
       run: |
         cd ~/aosp
-        echo "=== Locating Compiled Binary ==="
-
-        # Find the adbd binary
-        ADBD_PATH=$(find out -name "adbd" -type f 2>/dev/null | grep -v ".git" | head -1)
-
-        if [ -z "$ADBD_PATH" ]; then
-          echo "❌ adbd binary not found in out/"
-          echo "Searching entire AOSP directory..."
-          find . -name "adbd" -type f 2>/dev/null | head -5
-          exit 1
-        fi
-
+        echo "Locating binary..."
+        ADBD_PATH=$(find out -name "adbd" -type f 2>/dev/null | head -1)
+        [ -n "$ADBD_PATH" ] || (echo "❌ adbd not found"; exit 1)
         echo "✓ Found: $ADBD_PATH"
-        file "$ADBD_PATH"
-        ls -lh "$ADBD_PATH"
-
-        # Copy to workspace root
         cp "$ADBD_PATH" $GITHUB_WORKSPACE/adbd_arm64
-        echo "✓ Binary copied to workspace"
-
-    - name: Verify Final Binary
-      run: |
-        cd $GITHUB_WORKSPACE
-        echo "=== Verifying Final Binary ==="
-
-        if [ ! -f "adbd_arm64" ]; then
-          echo "❌ Final binary not found"
-          exit 1
-        fi
-
-        file adbd_arm64
-        ls -lh adbd_arm64
-        echo "✓ Binary ready for release"
+        file $GITHUB_WORKSPACE/adbd_arm64
+        ls -lh $GITHUB_WORKSPACE/adbd_arm64
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
-      if: success()
       with:
         name: adbd-arm64
         path: adbd_arm64
-        retention-days: 30
 
     - name: Create Release
-      if: success()
       uses: softprops/action-gh-release@v2
       with:
         files: adbd_arm64
@@ -280,22 +107,16 @@ jobs:
         body: |
           # ADB ARM64 Build #${{ github.run_number }}
 
-          **修改说明:**
-          - ✓ 禁用授权检查 (auth_required = false)
-          - ✓ 强制 Root 权限 (should_drop_privileges() = false)
-          - ✓ 无系统属性依赖
+          **Modifications:**
+          - ✓ Auth disabled (auth_required = false)
+          - ✓ Always root (should_drop_privileges() = false)
+          - ✓ No system properties dependency
 
-          **使用方法:**
+          **Deploy:**
           ```bash
           adb push adbd_arm64 /system/bin/adbd
           adb shell chmod 755 /system/bin/adbd
           adb reboot
           ```
-
-          **编译信息:**
-          - 架构: ARM64 (aarch64)
-          - API 级别: 30+
-          - 使用方法：完整 AOSP 编译
-          - 编译 ID: ${{ github.run_id }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
