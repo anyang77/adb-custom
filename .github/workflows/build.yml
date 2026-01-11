@@ -57,7 +57,18 @@ jobs:
         mkdir -p ~/bin
         curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
         chmod a+x ~/bin/repo
+
+        # Verify repo installation
+        ~/bin/repo --version || {
+          echo "Repo installation failed, retrying..."
+          rm -f ~/bin/repo
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          ~/bin/repo --version
+        }
+
         export PATH="$HOME/bin:$PATH"
+        echo "PATH=$PATH" >> $GITHUB_ENV
 
         echo "✓ Dependencies installed"
 
@@ -85,12 +96,30 @@ jobs:
 
         export PATH="$HOME/bin:$PATH"
 
+        # Verify repo is available
+        if ! ~/bin/repo --version > /dev/null 2>&1; then
+          echo "❌ repo tool not available"
+          exit 1
+        fi
+
+        echo "Using repo: $(which ~/bin/repo)"
+        echo "Repo version: $(~/bin/repo --version)"
+        echo ""
+
+        # Initialize repo
+        echo "Running: repo init -u https://android.googlesource.com/platform/manifest -b android-13.0.0_r1 --depth=1"
         ~/bin/repo init \
           -u https://android.googlesource.com/platform/manifest \
           -b android-13.0.0_r1 \
           --depth=1 \
           -j 4 \
-          2>&1 | tail -5
+          2>&1 | tail -10
+
+        # Verify initialization
+        if [ ! -d ".repo" ]; then
+          echo "❌ repo init failed"
+          exit 1
+        fi
 
         echo "✓ AOSP initialized"
 
@@ -101,6 +130,10 @@ jobs:
         cd ~/aosp
 
         export PATH="$HOME/bin:$PATH"
+
+        # Verify repo tool
+        echo "Repo tool: $(which ~/bin/repo)"
+        ~/bin/repo --version
 
         ATTEMPT=0
         MAX_ATTEMPTS=3
@@ -119,17 +152,31 @@ jobs:
             if [ -f "build/envsetup.sh" ]; then
               echo "✓ Sync successful"
               break
+            else
+              echo "⚠ Sync completed but build/envsetup.sh not found"
+            fi
+          else
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 124 ]; then
+              echo "⚠ Sync timeout (1 hour), retrying..."
+            else
+              echo "⚠ Sync failed (exit code: $EXIT_CODE), retrying..."
             fi
           fi
 
           if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
-            echo "⚠ Sync attempt $ATTEMPT failed, retrying in 30 seconds..."
+            echo "Waiting 30 seconds before retry..."
             sleep 30
           fi
         done
 
         if [ ! -f "build/envsetup.sh" ]; then
           echo "❌ Failed to sync AOSP after $MAX_ATTEMPTS attempts"
+          echo ""
+          echo "Troubleshooting:"
+          echo "  1. Check network: ping android.googlesource.com"
+          echo "  2. Check disk space: df -h"
+          echo "  3. Manual sync: cd ~/aosp && ~/bin/repo sync -j1"
           exit 1
         fi
 
