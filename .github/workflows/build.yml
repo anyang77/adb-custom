@@ -94,21 +94,22 @@ jobs:
         mkdir -p ~/aosp
         cd ~/aosp
 
-        export PATH="$HOME/bin:$PATH"
+        # Use absolute path to repo tool
+        REPO_TOOL="${HOME}/bin/repo"
 
         # Verify repo is available
-        if ! ~/bin/repo --version > /dev/null 2>&1; then
-          echo "❌ repo tool not available"
+        if [ ! -f "$REPO_TOOL" ]; then
+          echo "❌ repo tool not found at $REPO_TOOL"
           exit 1
         fi
 
-        echo "Using repo: $(which ~/bin/repo)"
-        echo "Repo version: $(~/bin/repo --version)"
+        echo "Using repo: $REPO_TOOL"
+        "$REPO_TOOL" --version
         echo ""
 
         # Initialize repo
         echo "Running: repo init -u https://android.googlesource.com/platform/manifest -b android-13.0.0_r1 --depth=1"
-        ~/bin/repo init \
+        "$REPO_TOOL" init \
           -u https://android.googlesource.com/platform/manifest \
           -b android-13.0.0_r1 \
           --depth=1 \
@@ -129,11 +130,17 @@ jobs:
         echo "=== Syncing AOSP sources ==="
         cd ~/aosp
 
-        export PATH="$HOME/bin:$PATH"
+        # Use absolute path to repo tool - no PATH dependency
+        REPO_TOOL="${HOME}/bin/repo"
 
-        # Verify repo tool
-        echo "Repo tool: $(which ~/bin/repo)"
-        ~/bin/repo --version
+        # Verify repo is available
+        if [ ! -f "$REPO_TOOL" ]; then
+          echo "❌ repo tool not found at $REPO_TOOL"
+          exit 1
+        fi
+
+        echo "Using repo: $REPO_TOOL"
+        "$REPO_TOOL" --version
 
         ATTEMPT=0
         MAX_ATTEMPTS=3
@@ -143,7 +150,7 @@ jobs:
           echo ""
           echo "Sync attempt $ATTEMPT/$MAX_ATTEMPTS"
 
-          if timeout 3600 ~/bin/repo sync \
+          if timeout 3600 "$REPO_TOOL" sync \
             -j 4 \
             --no-tags \
             --no-clone-bundle \
@@ -176,7 +183,7 @@ jobs:
           echo "Troubleshooting:"
           echo "  1. Check network: ping android.googlesource.com"
           echo "  2. Check disk space: df -h"
-          echo "  3. Manual sync: cd ~/aosp && ~/bin/repo sync -j1"
+          echo "  3. Manual sync: cd ~/aosp && $REPO_TOOL sync -j1"
           exit 1
         fi
 
