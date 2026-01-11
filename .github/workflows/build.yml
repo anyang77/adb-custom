@@ -75,6 +75,7 @@ jobs:
         timeout 7200 repo sync -j4 --no-tags --no-clone-bundle \
           packages/modules/adb \
           build/make \
+          build/soong \
           system/core \
           system/libbase \
           system/logging \
@@ -94,14 +95,16 @@ jobs:
         echo "Sync exit code: $SYNC_RESULT"
 
         # Even if timeout, check if key files exist
-        if [ -d "packages/modules/adb" ] && [ -f "build/make/core/main.mk" ]; then
+        if [ -d "packages/modules/adb" ] && [ -f "build/make/core/main.mk" ] && [ -f "build/soong/soong_ui.bash" ]; then
           echo "✓ Essential AOSP files synced successfully"
         else
-          echo "⚠ Some files may not be synced, continuing anyway..."
+          echo "⚠ Some files may not be synced, checking status..."
           echo "Checking directory status:"
           [ -d "packages/modules/adb" ] && echo "  ✓ packages/modules/adb exists" || echo "  ✗ packages/modules/adb MISSING"
           [ -d "build/make" ] && echo "  ✓ build/make exists" || echo "  ✗ build/make MISSING"
+          [ -d "build/soong" ] && echo "  ✓ build/soong exists" || echo "  ✗ build/soong MISSING"
           [ -d "system/core" ] && echo "  ✓ system/core exists" || echo "  ✗ system/core MISSING"
+          [ -f "build/soong/soong_ui.bash" ] && echo "  ✓ soong_ui.bash exists" || echo "  ✗ soong_ui.bash MISSING"
         fi
 
     - name: Verify AOSP Structure
